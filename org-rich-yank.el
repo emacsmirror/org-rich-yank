@@ -101,7 +101,9 @@ See `org-rich-yank--format-paste-default' for example and expected arguments."
 (defvar org-rich-yank--lang nil
   "Language of the most recent `kill-ring' text.
 Often but not always the language of buffer major mode; see
-`org-rich-yank--get-lang'.")
+`org-rich-yank--get-lang'.
+
+If nil, the default formatter uses #+begin_quote instead of #+begin_src.")
 
 (defun org-rich-yank--get-lang ()
   "Find source language of current kill.
@@ -172,33 +174,36 @@ ARGS ignored."
 
 (defun org-rich-yank--get-X-clipboard-link ()
   "Search X gui CLIPBOARD selection for data with an url mime type.
-Common url mime types defined in `org-rich-yank--clipboard-link-mime-types'."
+Common url mime types defined in `org-rich-yank--clipboard-link-mime-types'.
+
+If found, sets org-rich-yank--lang to nil, for quote formatting."
   (when-let* ((data-types (gui-get-selection 'CLIPBOARD 'TARGETS))
               (data-type (and (vectorp data-types)
                               (seq-find
                                (lambda (dt) (memq dt org-rich-yank--clipboard-link-mime-types))
                                data-types)))
               (data (gui-get-selection 'CLIPBOARD data-type))
-              ;; TODO: Can/should we use yank-media-preferred-types or yank-media-autoselect-function?
-              (link-data (and (fboundp 'yank-media-types--format)
-                              (yank-media-types--format data-type data))))
-    ;; TODO: if pandoc is installed, we could use the text/html target and do something like
-    ;; `xclip -o -selection clipboard -t text/html | pandoc -f html -t org`
-    ;; TODO: Customizable list of GUI link-cleaner functions:
-    (if (eq data-type 'application/x-openoffice-link\;windows_formatname=\"Link\")
-        (when-let ((path (nth 1 (split-string link-data "\0"))))
-          (format "[[file://%s]]" path))
-      link-data)))
+              (link-data (yank-media-types--format data-type data))
+              ;; TODO: Customizable list of GUI link-cleaner functions:
+              (formatted-link (if (eq data-type 'application/x-openoffice-link\;windows_formatname=\"Link\")
+                                  (when-let* ((path (nth 1 (split-string link-data "\0"))))
+                                    (format "[[file://%s]]" path))
+                                link-data)))
+    (setq org-rich-yank--lang nil) ; TODO: could run lang-detect in case it's code?
+    (setq org-rich-yank--buffer nil)
+    formatted-link))
 
 (defun org-rich-yank--link ()
   "Get an org-link to the current kill."
   (or
    (org-rich-yank--get-X-clipboard-link)
-   (with-current-buffer org-rich-yank--buffer
-     (let ((link (org-rich-yank--store-link)))
-       ;; TODO: make it (file-relative-name … dir-of-org-file) if
-       ;; they're in the same projectile-project
-       (when link (concat link "\n"))))
+   (when org-rich-yank--buffer
+     (with-current-buffer org-rich-yank--buffer
+       (let ((link (org-rich-yank--store-link)))
+         ;; TODO: make it (file-relative-name … dir-of-org-file) if
+         ;; they're in the same projectile-project
+         (when link
+           (concat link "\n")))))
    ;; Don't insert "nil" if no link found:
    ""))
 
@@ -213,10 +218,15 @@ Common url mime types defined in `org-rich-yank--clipboard-link-mime-types'."
 
 (defun org-rich-yank--format-paste-default (language contents link)
   "Format LANGUAGE, CONTENTS and LINK as an `org-mode' source block."
-  (format "#+BEGIN_SRC %s\n%s\n#+END_SRC\n%s"
-          language
-          (org-rich-yank--trim-nl contents)
-          link))
+  (let ((trimmed-contents (org-rich-yank--trim-nl contents)))
+    (if language
+        (format "#+begin_src %s\n%s\n#+end_src\n%s"
+                language
+                trimmed-contents
+                link)
+      (format "#+begin_quote\n%s\n#+end_quote\n%s"
+              trimmed-contents
+              link))))
 
 (defun org-rich-yank--treat-as-image ()
   "Non-nil if clipboard contents contain image, and `org-download' feature enabled."
@@ -228,27 +238,23 @@ Common url mime types defined in `org-rich-yank--clipboard-link-mime-types'."
 (defun org-rich-yank ()
   "Yank, surrounded by #+BEGIN_SRC block with major mode of originating buffer."
   (interactive)
-  (cond ((org-rich-yank--treat-as-image)
-         (org-download-clipboard))
-        ((and org-rich-yank--buffer
-              org-rich-yank--lang)
-         (let* ((escaped-kill (org-escape-code-in-string (current-kill 0)))
-                (needs-initial-newline
-                 (save-excursion
-                   (re-search-backward "\\S " (line-beginning-position) 'noerror)))
-                (link (org-rich-yank--link))
-                (paste (funcall org-rich-yank-format-paste
-                                org-rich-yank--lang
-                                escaped-kill
-                                link)))
-           (when needs-initial-newline
-             (insert "\n"))
-           (insert
-            (if org-rich-yank-add-target-indent
-                (org-rich-yank-indent paste)
-              paste))))
-        (t
-         (message "`org-rich-yank' doesn't know the source buffer – please `kill-ring-save' and try again."))))
+  (if (org-rich-yank--treat-as-image)
+      (org-download-clipboard)
+    (let* ((escaped-kill (org-escape-code-in-string (current-kill 0)))
+           (needs-initial-newline
+            (save-excursion
+              (re-search-backward "\\S " (line-beginning-position) 'noerror)))
+           (link (org-rich-yank--link))
+           (paste (funcall org-rich-yank-format-paste
+                           org-rich-yank--lang
+                           escaped-kill
+                           link)))
+      (when needs-initial-newline
+        (insert "\n"))
+      (insert
+       (if org-rich-yank-add-target-indent
+           (org-rich-yank-indent paste)
+         paste)))))
 
 
 (provide 'org-rich-yank)
